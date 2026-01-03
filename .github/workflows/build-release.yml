@@ -2,7 +2,11 @@ name: Build Release
 
 on:
   workflow_dispatch:
-
+    inputs:
+      tag:
+        description: '输入要创建的 Release 标签 (例如: v1.0.1)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -12,27 +16,38 @@ jobs:
   create-release:
     name: Create Release
     runs-on: ubuntu-latest
+    # 关键改动: 将输入的 tag 名作为输出，传递给下一个 job
+    outputs:
+      version: ${{ github.event.inputs.tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-
       - name: Setup node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - run: npx changelogithub
+      - name: Generate changelog
+        run: npx changelogithub --outfile CHANGELOG.md
         env:
           GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # 关键改动: 使用手动输入的 tag
+          tag_name: ${{ github.event.inputs.tag }}
+          # 将生成的 changelog 作为 Release 的内容
+          body_path: CHANGELOG.md
 
   build-matrix:
     name: Release Go Binary
     runs-on: ubuntu-latest
+    # 关键改动: 依赖 create-release job，确保它先运行
+    needs: create-release
     strategy:
       matrix:
         goos: [linux, darwin, windows]
@@ -43,12 +58,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 关键改动: 检出刚刚由上一个 job 创建的 tag
+          ref: ${{ needs.create-release.outputs.version }}
 
-      - name: Extract version from Git Ref
-        id: extract_version
+      - name: Prepare Version Variable
+        id: prep_version
         run: |
-          VERSION=$(echo "${{ github.ref }}" | sed 's/refs\/tags\/v//')
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          TAG=${{ needs.create-release.outputs.version }}
+          # 从 tag 中移除 'v' 前缀，用于 ldflags
+          VERSION=${TAG#v}
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Release Go Binary
         uses: wangyoucao577/go-release-action@v1
@@ -57,6 +77,8 @@ jobs:
           goos: ${{ matrix.goos }}
           goarch: ${{ matrix.goarch }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # 关键改动: 明确告诉 action 要把文件上传到哪个 release
+          release_tag: ${{ needs.create-release.outputs.version }}
           extra_files: |
             LICENSE
             README.md
@@ -66,5 +88,3 @@ jobs:
             -X "github.com/krau/SaveAny-Bot/config.BuildTime=${{ format(github.event.repository.updated_at, 'yyyy-MM-dd HH:mm:ss') }}"
             -X "github.com/krau/SaveAny-Bot/config.GitCommit=${{ github.sha }}"
           binary_name: saveany-bot
-        env:
-          VERSION: ${{ env.VERSION }}
